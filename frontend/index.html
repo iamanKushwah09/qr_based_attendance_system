@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Attendance Portal - Login</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="auth-body">
+  <div class="auth-container">
+    <h1>Attendance Portal</h1>
+    <p class="subtitle">Welcome back 👋 Please login to continue</p>
+
+    <form id="loginForm" class="card">
+      <label>
+        Username (roll no / admin / teacher)
+        <input type="text" id="username" required>
+      </label>
+
+      <label>
+        Password
+        <input type="password" id="password" required>
+      </label>
+
+      <button type="submit" class="btn primary">Login</button>
+
+      <p id="loginError" class="error-msg"></p>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

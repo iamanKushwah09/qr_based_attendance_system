@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Admin Dashboard - Attendance</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="page-body">
+  <header class="topbar">
+    <div>
+      <h1>Admin Dashboard</h1>
+      <p id="adminUserInfo" class="muted"></p>
+    </div>
+    <button onclick="logout()" class="btn danger">Logout</button>
+  </header>
+
+  <main class="layout">
+    <!-- Left: Actions -->
+    <section class="panel">
+      <h2>Quick Actions</h2>
+
+      <div class="card">
+        <h3>Create Class</h3>
+        <label>
+          Class Name (e.g. BCA, BBA)
+          <input type="text" id="classNameInput">
+        </label>
+        <button class="btn primary" onclick="adminCreateClass()">Create Class</button>
+        <p id="classMsg" class="info-msg"></p>
+      </div>
+
+      <div class="card">
+        <h3>Create Teacher User</h3>
+        <label>
+          Username (e.g. teacher1)
+          <input type="text" id="teacherUsername">
+        </label>
+        <label>
+          Password
+          <input type="password" id="teacherPassword">
+        </label>
+        <button class="btn primary" onclick="adminCreateTeacher()">Create Teacher</button>
+        <p class="muted">Teacher ka assigned_class backend ke teachers API se set karoge.</p>
+        <p id="teacherMsg" class="info-msg"></p>
+      </div>
+
+      <div class="card">
+        <h3>Create Student (with login)</h3>
+        <label>
+          Name
+          <input type="text" id="studentName">
+        </label>
+        <label>
+          Roll No (also used as username)
+          <input type="text" id="studentRoll">
+        </label>
+        <label>
+          Class Name (must exist)
+          <input type="text" id="studentClass">
+        </label>
+        <label>
+          Password (for student login)
+          <input type="password" id="studentPassword">
+        </label>
+        <button class="btn primary" onclick="adminCreateStudent()">Create Student</button>
+        <p id="studentMsg" class="info-msg"></p>
+      </div>
+    </section>
+
+    <!-- Right: Lists & QR -->
+    <section class="panel">
+      <h2>Overview</h2>
+
+      <div class="card">
+        <div class="card-header-row">
+          <h3>All Students</h3>
+          <button class="btn small" onclick="adminLoadStudents()">Refresh</button>
+        </div>
+        <div id="studentsList" class="scroll-area"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header-row">
+          <h3>QR Codes</h3>
+          <button class="btn small" onclick="openAllQrPreview()">Open Gallery</button>
+        </div>
+        <p class="muted">Opens a full QR gallery in new tab using <code>/students/all-qr-preview</code>.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
