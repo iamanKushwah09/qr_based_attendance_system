@@ -43,3 +43,4 @@ sdist/
 .idea/
 *.sqlite
 *.sqlite3
+/backend.zip

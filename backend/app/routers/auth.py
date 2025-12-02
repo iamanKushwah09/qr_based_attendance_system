@@ -1,384 +1,509 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Body
-from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
+# backend/app/routers/auth.py
+from fastapi import APIRouter, HTTPException, Depends, status, Body, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 import hashlib
 from datetime import datetime, timedelta
-import secrets
+from pydantic import BaseModel, EmailStr, validator
+import re
 
 from app.database import connect
-from app.utils.jwt_handler import create_access_token
-from app.models.login import LoginRequest
-from app.models.register import RegisterRequest
+from app.utils.jwt_handler import create_access_token, create_refresh_token
+from app.utils.email_service import EmailService
 from app import config
 
-router = APIRouter(prefix="/auth", tags=["Auth"])
-
-# Simple Bearer token scheme (Swagger me "Value" box ke liye)
+router = APIRouter(prefix="/auth", tags=["Authentication"])
 bearer_scheme = HTTPBearer(auto_error=True)
 
-# ---------- PASSWORD STRENGTH CHECK ----------
+# Pydantic Models
+class RegisterRequest(BaseModel):
+    username: str
+    email: EmailStr
+    mobile: str | None = None
+    password: str
+    role: str = "admin"
+    
+    @validator('username')
+    def validate_username(cls, v):
+        if len(v) < 3:
+            raise ValueError('Username must be at least 3 characters')
+        if not re.match(r'^[a-zA-Z0-9_]+$', v):
+            raise ValueError('Username can only contain letters, numbers, and underscores')
+        return v
+    
+    @validator('mobile')
+    def validate_mobile(cls, v):
+        if v and not re.match(r'^\+?[0-9]{10,15}$', v):
+            raise ValueError('Invalid mobile number format')
+        return v
+    
+    @validator('role')
+    def validate_role(cls, v):
+        if v not in ('admin', 'teacher', 'student'):
+            raise ValueError('Invalid role')
+        return v
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class VerifyOTPRequest(BaseModel):
+    email: EmailStr
+    otp: str
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+
+# Password validation
 def validate_password_strength(password: str):
-    """
-    Strong password rules:
-    - kam se kam 8 characters
-    - letters + numbers dono hone chahiye
-    - space allowed nahi
-    """
-    if len(password) < 8:
+    """Strong password validation"""
+    if len(password) < config.PASSWORD_MIN_LENGTH:
         raise HTTPException(
             status_code=400,
-            detail="Password must be at least 8 characters long",
+            detail=f"Password must be at least {config.PASSWORD_MIN_LENGTH} characters long"
         )
-
-    has_letter = any(c.isalpha() for c in password)
-    has_digit = any(c.isdigit() for c in password)
-
-    if not (has_letter and has_digit):
-        raise HTTPException(
-            status_code=400,
-            detail="Password must contain both letters and numbers",
-        )
-
+    
+    if not re.search(r'[A-Z]', password):
+        raise HTTPException(400, "Password must contain at least one uppercase letter")
+    
+    if not re.search(r'[a-z]', password):
+        raise HTTPException(400, "Password must contain at least one lowercase letter")
+    
+    if not re.search(r'[0-9]', password):
+        raise HTTPException(400, "Password must contain at least one number")
+    
+    if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+        raise HTTPException(400, "Password must contain at least one special character")
+    
     if " " in password:
-        raise HTTPException(
-            status_code=400,
-            detail="Password must not contain spaces",
-        )
+        raise HTTPException(400, "Password must not contain spaces")
 
+# Audit logging
+async def log_action(db, user_id: int, action: str, entity_type: str = None, 
+                     entity_id: int = None, details: dict = None, ip: str = None):
+    """Log user actions for audit trail"""
+    await db.execute("""
+        INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
+        VALUES ($1, $2, $3, $4, $5, $6)
+    """, user_id, action, entity_type, entity_id, details, ip)
 
-# ---------- REGISTER (create admin/teacher/student user) ----------
-@router.post("/register")
-async def register(data: RegisterRequest):
+# ==================== REGISTRATION ====================
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+async def register(data: RegisterRequest, request: Request):
+    """Register new user (admin/teacher/student)"""
     db = await connect()
+    
+    try:
+        # Check existing username
+        existing = await db.fetchrow("SELECT id FROM users WHERE username=$1", data.username)
+        if existing:
+            raise HTTPException(400, "Username already exists")
+        
+        # Check existing email
+        if data.email:
+            existing_email = await db.fetchrow("SELECT id FROM users WHERE email=$1", data.email)
+            if existing_email:
+                raise HTTPException(400, "Email already registered")
+        
+        # Check existing mobile
+        if data.mobile:
+            existing_mobile = await db.fetchrow("SELECT id FROM users WHERE mobile=$1", data.mobile)
+            if existing_mobile:
+                raise HTTPException(400, "Mobile number already registered")
+        
+        # Validate password
+        validate_password_strength(data.password)
+        
+        # Hash password
+        hashed = hashlib.sha256(data.password.encode()).hexdigest()
+        
+        # Insert user
+        user_id = await db.fetchval("""
+            INSERT INTO users (username, email, mobile, password_hash, role, is_verified)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
+        """, data.username, data.email, data.mobile, hashed, data.role, True)
+        
+        # Log action
+        await log_action(db, user_id, "USER_REGISTERED", "users", user_id, 
+                        {"role": data.role}, request.client.host)
+        
+        # Send welcome email
+        if data.email:
+            await EmailService.send_welcome_email(data.email, data.username, data.role)
+        
+        return {
+            "msg": "User registered successfully",
+            "user_id": user_id,
+            "username": data.username,
+            "role": data.role
+        }
+    
+    finally:
+        await db.close()
 
-    # check if username already exists
-    existing = await db.fetchrow(
-        "SELECT * FROM users WHERE username=$1", data.username
-    )
-    if existing:
-        raise HTTPException(
-            status_code=400, detail="User already exists"
-        )
-
-    if data.role not in ("admin", "teacher", "student"):
-        raise HTTPException(
-            status_code=400, detail="Invalid role"
-        )
-
-    # strong password rule
-    validate_password_strength(data.password)
-
-    hashed = hashlib.sha256(data.password.encode()).hexdigest()
-
-    await db.execute(
-        """
-        INSERT INTO users (username, password_hash, role)
-        VALUES ($1, $2, $3)
-        """,
-        data.username,
-        hashed,
-        data.role,
-    )
-
-    return {"msg": "User registered successfully"}
-
-
-# ---------- LOGIN ----------
+# ==================== LOGIN ====================
 @router.post("/login")
-async def login(data: LoginRequest):
+async def login(data: LoginRequest, request: Request):
+    """User login with JWT token"""
     db = await connect()
-    hashed = hashlib.sha256(data.password.encode()).hexdigest()
+    
+    try:
+        hashed = hashlib.sha256(data.password.encode()).hexdigest()
+        
+        user = await db.fetchrow("""
+            SELECT id, username, email, role, assigned_class, is_active, is_verified
+            FROM users 
+            WHERE username=$1 AND password_hash=$2
+        """, data.username, hashed)
+        
+        if not user:
+            raise HTTPException(401, "Invalid username or password")
+        
+        if not user['is_active']:
+            raise HTTPException(403, "Account is deactivated. Contact administrator.")
+        
+        # Update last login
+        await db.execute("UPDATE users SET last_login=$1 WHERE id=$2", 
+                        datetime.utcnow(), user['id'])
+        
+        # Create tokens
+        access_token = create_access_token({
+            "sub": user["username"],
+            "role": user["role"],
+            "user_id": user["id"]
+        })
+        
+        refresh_token = create_refresh_token({
+            "sub": user["username"]
+        })
+        
+        # Log action
+        await log_action(db, user['id'], "USER_LOGIN", "users", user['id'], 
+                        None, request.client.host)
+        
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": {
+                "id": user['id'],
+                "username": user["username"],
+                "email": user["email"],
+                "role": user["role"],
+                "assigned_class": user["assigned_class"]
+            }
+        }
+    
+    finally:
+        await db.close()
 
-    # generic message (user / pass dono ke liye same) -> security best practice
-    invalid_exc = HTTPException(
-        status_code=401,
-        detail="Invalid username or password",
-    )
-
-    user = await db.fetchrow(
-        "SELECT * FROM users WHERE username=$1 AND password_hash=$2",
-        data.username,
-        hashed,
-    )
-
-    if not user:
-        raise invalid_exc
-
-    token = create_access_token(
-        {"sub": user["username"], "role": user["role"]}
-    )
-    return {"token": token}
-
-
-# ---------- CURRENT USER & ROLE HELPERS ----------
-
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-):
+# ==================== GET CURRENT USER ====================
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
+    """Get current authenticated user"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
     )
-
-    raw_token = credentials.credentials  # "Bearer <token>" me se sirf token part
-
+    
     try:
         payload = jwt.decode(
-            raw_token,
+            credentials.credentials,
             config.SECRET_KEY,
-            algorithms=[config.ALGORITHM],
+            algorithms=[config.ALGORITHM]
         )
         username = payload.get("sub")
-
-        if username is None:
-            raise credentials_exception 
-
-    except JWTError:
-        raise credentials_exception
-
-    db = await connect()
-    user = await db.fetchrow(
-        "SELECT username, role, assigned_class FROM users WHERE username=$1",
-        username,
-    )
-    if not user:
-        raise credentials_exception
-
-    return {
-        "username": user["username"],
-        "role": user["role"],
-        "assigned_class": user["assigned_class"],
-    }
-
-# async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-    )
-
-    if token is None:
-        raise credentials_exception
-
-    try:
-        payload = jwt.decode(
-            token,
-            config.SECRET_KEY,
-            algorithms=[config.ALGORITHM],
-        )
-        username = payload.get("sub")
-
         if username is None:
             raise credentials_exception
-
     except JWTError:
         raise credentials_exception
-
-    # DB se latest role + assigned_class le aate hain
+    
     db = await connect()
-    user = await db.fetchrow(
-        "SELECT username, role, assigned_class FROM users WHERE username=$1",
-        username,
-    )
-    if not user:
-        raise credentials_exception
+    try:
+        user = await db.fetchrow("""
+            SELECT id, username, email, mobile, role, assigned_class, is_active
+            FROM users WHERE username=$1
+        """, username)
+        
+        if not user:
+            raise credentials_exception
+        
+        if not user['is_active']:
+            raise HTTPException(403, "Account is deactivated")
+        
+        return dict(user)
+    finally:
+        await db.close()
 
-    return {
-        "username": user["username"],
-        "role": user["role"],
-        "assigned_class": user["assigned_class"],
-    }
-
-
+# Role-based dependencies
 async def admin_required(current_user: dict = Depends(get_current_user)):
+    """Admin role required"""
     if current_user["role"] != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
+        raise HTTPException(403, "Admin access required")
     return current_user
-
 
 async def staff_required(current_user: dict = Depends(get_current_user)):
-    # staff = admin or teacher
+    """Admin or Teacher role required"""
     if current_user["role"] not in ("admin", "teacher"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Teacher or admin access required",
-        )
+        raise HTTPException(403, "Staff access required")
     return current_user
 
-
-# ---------- CHANGE OWN PASSWORD (Admin + Teacher + Student) ----------
+# ==================== CHANGE PASSWORD ====================
 @router.post("/change-password")
-async def change_own_password(
-    old_password: str = Body(...),
-    new_password: str = Body(...),
+async def change_password(
+    request: Request,
+    data: ChangePasswordRequest,
     current_user: dict = Depends(get_current_user),
+    
 ):
-    """
-    Logged-in user (admin / teacher / student) apna password change karega.
-    - old password verify hoga
-    - new password strong hona chahiye
-    """
-
+    """Change own password"""
     db = await connect()
+    
+    try:
+        # Verify old password
+        old_hash = hashlib.sha256(data.old_password.encode()).hexdigest()
+        user = await db.fetchrow(
+            "SELECT id FROM users WHERE username=$1 AND password_hash=$2",
+            current_user["username"], old_hash
+        )
+        
+        if not user:
+            raise HTTPException(400, "Current password is incorrect")
+        
+        # Validate new password
+        validate_password_strength(data.new_password)
+        
+        # Update password
+        new_hash = hashlib.sha256(data.new_password.encode()).hexdigest()
+        await db.execute(
+            "UPDATE users SET password_hash=$1, updated_at=$2 WHERE username=$3",
+            new_hash, datetime.utcnow(), current_user["username"]
+        )
+        
+        # Log action
+        await log_action(db, current_user['id'], "PASSWORD_CHANGED", "users", 
+                        current_user['id'], None, request.client.host)
+        
+        return {"msg": "Password changed successfully"}
+    
+    finally:
+        await db.close()
 
-    user = await db.fetchrow(
-        "SELECT * FROM users WHERE username=$1",
-        current_user["username"],
-    )
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+# ==================== FORGOT PASSWORD - REQUEST OTP ====================
+@router.post("/forgot-password/request")
+async def forgot_password_request(data: ForgotPasswordRequest):
+    """Request OTP for password reset"""
+    db = await connect()
+    
+    try:
+        user = await db.fetchrow(
+            "SELECT id, username, email, otp_attempts FROM users WHERE email=$1",
+            data.email
+        )
+        
+        if not user:
+            # Don't reveal if email exists
+            return {"msg": "If email exists, OTP has been sent"}
+        
+        # Check OTP attempts
+        if user['otp_attempts'] >= config.MAX_OTP_ATTEMPTS:
+            raise HTTPException(429, "Maximum OTP attempts reached. Try again after 1 hour.")
+        
+        # Generate OTP
+        otp = EmailService.generate_otp()
+        otp_expires = datetime.utcnow() + timedelta(minutes=config.OTP_EXPIRE_MINUTES)
+        
+        # Save OTP
+        await db.execute("""
+            UPDATE users 
+            SET otp=$1, otp_expires=$2, otp_attempts=otp_attempts+1, updated_at=$3
+            WHERE email=$4
+        """, otp, otp_expires, datetime.utcnow(), data.email)
+        
+        # Send OTP email
+        email_sent = await EmailService.send_otp_email(data.email, otp, user['username'])
+        
+        if not email_sent:
+            raise HTTPException(500, "Failed to send OTP email. Please try again.")
+        
+        return {
+            "msg": "OTP sent to your email",
+            "expires_in_minutes": config.OTP_EXPIRE_MINUTES
+        }
+    
+    finally:
+        await db.close()
 
-    old_hash = hashlib.sha256(old_password.encode()).hexdigest()
-    if old_hash != user["password_hash"]:
-        raise HTTPException(status_code=400, detail="Old password is incorrect")
+# ==================== VERIFY OTP ====================
+@router.post("/forgot-password/verify-otp")
+async def verify_otp(data: VerifyOTPRequest):
+    """Verify OTP before password reset"""
+    db = await connect()
+    
+    try:
+        user = await db.fetchrow("""
+            SELECT id, username, otp, otp_expires
+            FROM users WHERE email=$1
+        """, data.email)
+        
+        if not user or not user['otp']:
+            raise HTTPException(400, "Invalid OTP or email")
+        
+        # Check expiry
+        if user['otp_expires'] < datetime.utcnow():
+            raise HTTPException(400, "OTP has expired. Request a new one.")
+        
+        # Verify OTP
+        if user['otp'] != data.otp:
+            raise HTTPException(400, "Invalid OTP")
+        
+        return {"msg": "OTP verified successfully. You can now reset password."}
+    
+    finally:
+        await db.close()
 
-    # strong password check
-    validate_password_strength(new_password)
-    new_hash = hashlib.sha256(new_password.encode()).hexdigest()
+# ==================== RESET PASSWORD ====================
+@router.post("/forgot-password/reset")
+async def reset_password(data: ResetPasswordRequest, request: Request):
+    """Reset password using OTP"""
+    db = await connect()
+    
+    try:
+        user = await db.fetchrow("""
+            SELECT id, username, otp, otp_expires
+            FROM users WHERE email=$1
+        """, data.email)
+        
+        if not user or not user['otp']:
+            raise HTTPException(400, "Invalid request")
+        
+        # Check expiry
+        if user['otp_expires'] < datetime.utcnow():
+            raise HTTPException(400, "OTP has expired")
+        
+        # Verify OTP
+        if user['otp'] != data.otp:
+            raise HTTPException(400, "Invalid OTP")
+        
+        # Validate new password
+        validate_password_strength(data.new_password)
+        
+        # Update password and clear OTP
+        new_hash = hashlib.sha256(data.new_password.encode()).hexdigest()
+        await db.execute("""
+            UPDATE users 
+            SET password_hash=$1, otp=NULL, otp_expires=NULL, otp_attempts=0, updated_at=$2
+            WHERE email=$3
+        """, new_hash, datetime.utcnow(), data.email)
+        
+        # Log action
+        await log_action(db, user['id'], "PASSWORD_RESET", "users", user['id'], 
+                        None, request.client.host)
+        
+        return {"msg": "Password reset successfully"}
+    
+    finally:
+        await db.close()
 
-    await db.execute(
-        "UPDATE users SET password_hash=$1 WHERE username=$2",
-        new_hash,
-        current_user["username"],
-    )
-
-    return {"msg": "Password updated successfully"}
-
-
-# ---------- ADMIN: RESET ANY USER PASSWORD ----------
-@router.post("/admin-reset-password")
+# ==================== ADMIN: RESET USER PASSWORD ====================
+@router.post("/admin/reset-password")
 async def admin_reset_password(
     username: str = Body(...),
     new_password: str = Body(...),
     admin: dict = Depends(admin_required),
+    request: Request = None
 ):
-    """
-    Sirf ADMIN:
-    Kisi bhi user (admin/teacher/student) ka password reset kar sakta hai.
-    """
-
+    """Admin: Reset any user's password"""
     db = await connect()
+    
+    try:
+        user = await db.fetchrow("SELECT id, email FROM users WHERE username=$1", username)
+        if not user:
+            raise HTTPException(404, "User not found")
+        
+        # Validate password
+        validate_password_strength(new_password)
+        
+        # Update password
+        new_hash = hashlib.sha256(new_password.encode()).hexdigest()
+        await db.execute(
+            "UPDATE users SET password_hash=$1, updated_at=$2 WHERE username=$3",
+            new_hash, datetime.utcnow(), username
+        )
+        
+        # Log action
+        await log_action(db, admin['id'], "ADMIN_PASSWORD_RESET", "users", 
+                        user['id'], {"target_user": username}, 
+                        request.client.host if request else None)
+        
+        return {"msg": f"Password reset for user '{username}'"}
+    
+    finally:
+        await db.close()
 
-    user = await db.fetchrow(
-        "SELECT * FROM users WHERE username=$1",
-        username,
-    )
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+# ==================== REFRESH TOKEN ====================
+@router.post("/refresh")
+async def refresh_token(refresh_token: str = Body(..., embed=True)):
+    """Get new access token using refresh token"""
+    try:
+        payload = jwt.decode(
+            refresh_token,
+            config.SECRET_KEY,
+            algorithms=[config.ALGORITHM]
+        )
+        username = payload.get("sub")
+        
+        if username is None:
+            raise HTTPException(401, "Invalid refresh token")
+        
+        db = await connect()
+        try:
+            user = await db.fetchrow("""
+                SELECT id, username, role FROM users WHERE username=$1 AND is_active=TRUE
+            """, username)
+            
+            if not user:
+                raise HTTPException(401, "User not found or inactive")
+            
+            # Create new access token
+            new_access_token = create_access_token({
+                "sub": user["username"],
+                "role": user["role"],
+                "user_id": user["id"]
+            })
+            
+            return {
+                "access_token": new_access_token,
+                "token_type": "bearer"
+            }
+        finally:
+            await db.close()
+            
+    except JWTError:
+        raise HTTPException(401, "Invalid refresh token")
 
-    # strong password check
-    validate_password_strength(new_password)
-    hashed = hashlib.sha256(new_password.encode()).hexdigest()
-
-    await db.execute(
-        "UPDATE users SET password_hash=$1 WHERE username=$2",
-        hashed,
-        username,
-    )
-
-    return {"msg": f"Password reset successfully for user '{username}'"}
-
-
-# ---------- FORGOT PASSWORD: REQUEST RESET TOKEN ----------
-@router.post("/forgot-password/request")
-async def forgot_password_request(username: str = Body(..., embed=True)):
-    """
-    Public endpoint:
-    - User username dega (admin / teacher / student)
-    - Agar user exist karta hai to reset_token + expiry set hoga
-    - Response me bhi token bhej rahe hain (demo/test purpose)
-      Production me ise email/SMS se bhejna chahiye.
-    """
-
-    db = await connect()
-
-    user = await db.fetchrow(
-        "SELECT username FROM users WHERE username=$1",
-        username,
-    )
-
-    # Security ke liye: user exist ho ya na ho,
-    # same message return karte hain (username guessing avoid)
-    if not user:
-        return {
-            "msg": "If this username exists, a reset token has been generated."
-        }
-
-    # Random secure token generate
-    token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(minutes=15)  # 15 minutes valid
-
-    await db.execute(
-        """
-        UPDATE users
-        SET reset_token=$1, reset_token_expires=$2
-        WHERE username=$3
-        """,
-        token,
-        expires_at,
-        username,
-    )
-
-    # DEMO: token response me de rahe hain, taaki aap Swagger se test kar sako
-    return {
-        "msg": "Reset token generated. Use this token to reset your password (demo mode).",
-        "username": username,
-        "reset_token": token,
-        "expires_at_utc": expires_at.isoformat(),
-    }
-# ---------- FORGOT PASSWORD: CONFIRM RESET ----------
-@router.post("/forgot-password/confirm")
-async def forgot_password_confirm(
-    username: str = Body(...),
-    reset_token: str = Body(...),
-    new_password: str = Body(...),
+# ==================== LOGOUT ====================
+@router.post("/logout")
+async def logout(
+    current_user: dict = Depends(get_current_user),
+    request: Request = None
 ):
-    """
-    Public endpoint:
-    - username + reset_token + new_password
-    - Token + expiry check hoga
-    - Password strong hona chahiye
-    """
-
+    """Logout user (client should delete token)"""
     db = await connect()
-
-    user = await db.fetchrow(
-        """
-        SELECT username, reset_token, reset_token_expires
-        FROM users
-        WHERE username=$1
-        """,
-        username,
-    )
-
-    if not user or not user["reset_token"]:
-        raise HTTPException(status_code=400, detail="Invalid reset token or username")
-
-    # Expiry check
-    if not user["reset_token_expires"] or user["reset_token_expires"] < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Reset token has expired. Request a new one.")
-
-    # Token match?
-    if reset_token != user["reset_token"]:
-        raise HTTPException(status_code=400, detail="Invalid reset token")
-
-    # Strong password rule
-    validate_password_strength(new_password)
-    new_hash = hashlib.sha256(new_password.encode()).hexdigest()
-
-    # Update password + clear token
-    await db.execute(
-        """
-        UPDATE users
-        SET password_hash=$1,
-            reset_token=NULL,
-            reset_token_expires=NULL
-        WHERE username=$2
-        """,
-        new_hash,
-        username,
-    )
-
-    return {"msg": "Password has been reset successfully"}
+    try:
+        await log_action(db, current_user['id'], "USER_LOGOUT", "users", 
+                        current_user['id'], None, 
+                        request.client.host if request else None)
+        return {"msg": "Logged out successfully"}
+    finally:
+        await db.close()
