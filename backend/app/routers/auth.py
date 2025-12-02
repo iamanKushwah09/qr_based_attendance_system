@@ -91,10 +91,14 @@ def validate_password_strength(password: str):
 async def log_action(db, user_id: int, action: str, entity_type: str = None, 
                      entity_id: int = None, details: dict = None, ip: str = None):
     """Log user actions for audit trail"""
+    import json
+    # Convert details dict to JSON string for JSONB column
+    details_json = json.dumps(details) if details else None
+    
     await db.execute("""
         INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-        VALUES ($1, $2, $3, $4, $5, $6)
-    """, user_id, action, entity_type, entity_id, details, ip)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+    """, user_id, action, entity_type, entity_id, details_json, ip)
 
 # ==================== REGISTRATION ====================
 @router.post("/register", status_code=status.HTTP_201_CREATED)
