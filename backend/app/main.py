@@ -5,7 +5,8 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 import time
-
+import os
+from fastapi.staticfiles import StaticFiles
 from app.routers import auth, students, attendance, classes, teachers
 from app.database import init_db, close_db
 
@@ -32,6 +33,23 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json"
 )
+
+# 1. Get correct directories
+current_dir = os.path.dirname(os.path.abspath(__file__)) # Path: .../backend/app
+backend_dir = os.path.dirname(current_dir)               # Path: .../backend
+root_dir = os.path.dirname(backend_dir)                  # Path: .../ (Project Root)
+
+# 2. Point to QR folder
+qr_directory = os.path.join(root_dir, "QR", "qrcodes")
+
+# 3. Create if not exists
+os.makedirs(qr_directory, exist_ok=True)
+
+# 4. Debugging ke liye print karein (Server logs mein dikhega)
+print(f"📂 Serving QR codes from: {qr_directory}")
+
+# 5. Mount static files
+app.mount("/qrcodes", StaticFiles(directory=qr_directory), name="qrcodes")
 
 # CORS Configuration
 app.add_middleware(
@@ -79,11 +97,11 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 # Include routers
-app.include_router(auth.router,prefix="/api")
-app.include_router(teachers.router,prefix="/api")
-app.include_router(students.router,prefix="/api" )
-app.include_router(attendance.router,prefix="/api")
-app.include_router(classes.router,prefix="/api")
+app.include_router(auth.router, prefix="/api")
+app.include_router(teachers.router, prefix="/api")
+app.include_router(students.router, prefix="/api")
+app.include_router(attendance.router, prefix="/api")
+app.include_router(classes.router, prefix="/api")
 
 # Health check endpoint
 @app.get("/", tags=["Health"])

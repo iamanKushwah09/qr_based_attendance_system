@@ -9,7 +9,7 @@ DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", 5432))
 DB_NAME = os.getenv("DB_NAME", "claude_qr")
 DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASS = os.getenv("DB_PASS", "1234")
+DB_PASS = os.getenv("DB_PASS", "codewithaj")
 
 # JWT Configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-key-change-in-production")
