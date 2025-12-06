@@ -1,7 +1,7 @@
 // app.js - Modern QR Attendance System Frontend
 
 // Configuration
-const API_URL = 'http://localhost:8000/docs';
+const API_URL = 'http://localhost:8000/api';
 let authToken = null;
 let currentUser = null;
 let html5QrCode = null;

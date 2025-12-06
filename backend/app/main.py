@@ -79,11 +79,11 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 # Include routers
-app.include_router(auth.router)
-app.include_router(teachers.router)
-app.include_router(students.router)
-app.include_router(attendance.router)
-app.include_router(classes.router)
+app.include_router(auth.router,prefix="/api")
+app.include_router(teachers.router,prefix="/api")
+app.include_router(students.router,prefix="/api" )
+app.include_router(attendance.router,prefix="/api")
+app.include_router(classes.router,prefix="/api")
 
 # Health check endpoint
 @app.get("/", tags=["Health"])
