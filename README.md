@@ -82,7 +82,7 @@ cd backend
 pip install -r requirements.txt
 
 # 4. Setup PostgreSQL database
-createdb claude_db
+createdb claude_qr
 
 # 5. Configure environment
 cp .env.example .env
@@ -462,7 +462,7 @@ pg_dump -U postgres dance_db > backup_$(date +%Y%m%d).sql
 
 ### Restore Database
 ```bash
-psql -U postgres claude_db < backup_20241201.sql
+psql -U postgres claude_qr < backup_20241201.sql
 ```
 
 ---
